@@ -39,6 +39,7 @@ rand = "0.10"
 regex = "1.12"
 toml = "0.9"
 unicode-normalization = "0.1"
+tempfile = { version = "3.27", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }
@@ -48,7 +49,7 @@ named_pipe = "0.4.1"
 winreg = "0.55"
 
 [features]
-test-support = []
+test-support = ["dep:tempfile"]
 keyring = ["dep:keyring"]
 
 [dev-dependencies]

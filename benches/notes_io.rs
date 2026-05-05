@@ -10,16 +10,16 @@
 //!
 //!   - Reads / batch ops : HTTP ≤ 1.10× git-notes baseline
 //!   - Writes            : HTTP ≤ 1.20× git-notes baseline
-//!                         (queue insert is fast; async flush is excluded)
+//!     (queue insert is fast; async flush is excluded)
 //!   - Rebase (50 commits): HTTP ≤ 1.10× git-notes baseline
 //!
 //! # Backends under test
 //!
 //!   - `git_notes` — existing path: `git fast-import` / `git notes show`
 //!   - `http`      — new path: SQLite upsert/read via `notes-db`; the HTTP
-//!                   upload is intentionally excluded because it is async
-//!                   (daemon flush). For read fallback a local in-process
-//!                   mockito server is used so network latency is near zero.
+//!     upload is intentionally excluded because it is async
+//!     (daemon flush). For read fallback a local in-process
+//!     mockito server is used so network latency is near zero.
 //!
 //! # Architecture note: Config singleton bypass
 //!
@@ -47,12 +47,12 @@
 //! to a temporary file path before the first DB call. A `Mutex<Option<TempPath>>`
 //! guards the file lifetime; the DB is shared across all groups.
 //!
-//! # TmpRepo cannot be stored in a static
+//! # TmpRepo lifecycle
 //!
-//! `git2::Repository` wraps a raw pointer and is `!Send + !Sync`. Therefore
-//! `TmpRepo` cannot live in a process-global `static`. Instead each benchmark
-//! function creates its own `TmpRepo` during the *setup* phase (not the measured
-//! iteration), so setup cost is amortised by Criterion's many iterations.
+//! Each benchmark function creates its own `TmpRepo` during the *setup* phase
+//! (not the measured iteration), so setup cost is amortised by Criterion's many
+//! iterations. `TmpRepo` owns a `tempfile::TempDir` and a `git_ai::git::Repository`
+//! and is dropped at the end of the bench.
 //!
 //! # Sample sizes
 //!
@@ -116,57 +116,33 @@ fn ensure_notes_db_initialized() {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: create N commits directly via git2 (fast, no post-commit hook).
+// Helper: create N commits via the real `git` CLI (no post-commit hook).
 // Returns a Vec of commit SHA strings.
 // ---------------------------------------------------------------------------
 
-fn create_commits_git2(repo: &git2::Repository, count: usize) -> Vec<String> {
+fn create_commits(repo: &TmpRepo, count: usize) -> Vec<String> {
     let mut shas = Vec::with_capacity(count);
-    let sig =
-        git2::Signature::now("Bench User", "bench@bench.local").expect("bench: create signature");
-
     for i in 0..count {
-        let blob_id = repo
-            .blob(format!("bench-content-{}", i).as_bytes())
-            .expect("bench: create blob");
-        let mut tb = repo.treebuilder(None).expect("bench: treebuilder");
-        tb.insert(format!("bench_{}.txt", i), blob_id, 0o100644)
-            .expect("bench: tree insert");
-        let tree_id = tb.write().expect("bench: write tree");
-        let tree = repo.find_tree(tree_id).expect("bench: find tree");
-
-        let parents: Vec<git2::Commit> = if let Ok(head) = repo.head()
-            && let Some(target) = head.target()
-            && let Ok(parent) = repo.find_commit(target)
-        {
-            vec![parent]
-        } else {
-            vec![]
-        };
-        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
-
+        let filename = format!("bench_{}.txt", i);
+        let content = format!("bench-content-{}\n", i);
+        repo.write_file(&filename, &content, false)
+            .expect("bench: write file");
         let sha = repo
-            .commit(
-                Some("HEAD"),
-                &sig,
-                &sig,
-                &format!("bench commit {}", i),
-                &tree,
-                &parent_refs,
-            )
+            .commit_all(&format!("bench commit {}", i))
             .expect("bench: create commit");
-
-        shas.push(sha.to_string());
+        shas.push(sha);
     }
     shas
 }
 
-fn collect_all_commit_shas(repo: &git2::Repository) -> Vec<String> {
-    let mut walk = repo.revwalk().expect("bench: revwalk");
-    walk.push_head().expect("bench: push head");
-    walk.set_sorting(git2::Sort::TOPOLOGICAL)
-        .expect("bench: set sort");
-    walk.filter_map(|id| id.ok().map(|id| id.to_string()))
+fn collect_all_commit_shas(repo: &TmpRepo) -> Vec<String> {
+    let stdout = repo
+        .git_command(&["rev-list", "--topo-order", "HEAD"])
+        .expect("bench: rev-list");
+    stdout
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
         .collect()
 }
 
@@ -185,7 +161,7 @@ impl BenchRepo {
         ensure_notes_db_initialized();
 
         let repo = TmpRepo::new().expect("bench: create TmpRepo");
-        let shas = create_commits_git2(repo.repo(), count);
+        let shas = create_commits(&repo, count);
 
         // Pre-write into git-notes (for git_notes read benchmarks).
         for sha in &shas {
@@ -478,7 +454,7 @@ fn bench_rebase_50_commits(c: &mut Criterion) {
     group.bench_function(BenchmarkId::new("git_notes", "50_commits"), |b| {
         b.iter_batched(
             || setup_rebase_repo(REBASE_COMMIT_COUNT),
-            |(repo, feature_branch, main_branch)| {
+            |(repo, feature_branch, main_branch): (TmpRepo, String, String)| {
                 repo.switch_branch(&feature_branch)
                     .expect("switch to feature");
                 repo.rebase_onto(&feature_branch, &main_branch)
@@ -497,7 +473,7 @@ fn bench_rebase_50_commits(c: &mut Criterion) {
             || {
                 let (repo, fb, mb) = setup_rebase_repo(REBASE_COMMIT_COUNT);
                 // Pre-cache all commits' notes into notes-db.
-                let shas = collect_all_commit_shas(repo.repo());
+                let shas = collect_all_commit_shas(&repo);
                 {
                     let db = NotesDatabase::global().expect("get notes-db");
                     let mut lock = db.lock().expect("lock notes-db");
@@ -510,7 +486,7 @@ fn bench_rebase_50_commits(c: &mut Criterion) {
                 }
                 (repo, fb, mb)
             },
-            |(repo, feature_branch, main_branch)| {
+            |(repo, feature_branch, main_branch): (TmpRepo, String, String)| {
                 repo.switch_branch(&feature_branch)
                     .expect("switch to feature");
                 repo.rebase_onto(&feature_branch, &main_branch)

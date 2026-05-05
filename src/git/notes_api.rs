@@ -623,24 +623,9 @@ mod tests {
         let repo = TmpRepo::new().expect("TmpRepo::new");
 
         // Create a real commit so we have a valid SHA.
-        let f = repo
-            .write_file("a.txt", "hello", false)
+        repo.write_file("a.txt", "hello", false)
             .expect("write file");
-        let _ = f; // keep alive
-        let sha = {
-            let mut index = repo.repo().index().expect("index");
-            index
-                .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
-                .expect("add");
-            index.write().expect("write index");
-            let tree_id = index.write_tree().expect("write tree");
-            let tree = repo.repo().find_tree(tree_id).expect("find tree");
-            let sig = git2::Signature::now("Test", "test@example.com").expect("sig");
-            repo.repo()
-                .commit(Some("HEAD"), &sig, &sig, "msg", &tree, &[])
-                .expect("commit")
-                .to_string()
-        };
+        let sha = repo.commit_all("msg").expect("commit");
 
         // Write a note for this SHA using the Http helper.
         http_write_note(&sha, "some-note-content").expect("http write");
@@ -695,24 +680,9 @@ mod tests {
         let repo = TmpRepo::new().expect("TmpRepo::new");
 
         // Create a real commit.
-        let f = repo
-            .write_file("b.txt", "world", false)
+        repo.write_file("b.txt", "world", false)
             .expect("write file");
-        let _ = f;
-        let sha = {
-            let mut index = repo.repo().index().expect("index");
-            index
-                .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
-                .expect("add");
-            index.write().expect("write index");
-            let tree_id = index.write_tree().expect("write tree");
-            let tree = repo.repo().find_tree(tree_id).expect("tree");
-            let sig = git2::Signature::now("T", "t@t.com").expect("sig");
-            repo.repo()
-                .commit(Some("HEAD"), &sig, &sig, "test commit", &tree, &[])
-                .expect("commit")
-                .to_string()
-        };
+        let sha = repo.commit_all("test commit").expect("commit");
 
         // Put a note in the cache for this commit.
         http_write_note(&sha, "display-note-content").expect("write note");
@@ -742,10 +712,10 @@ mod tests {
         }
     }
 
-    /// Verify that `push_pre_command_hook` has the correct early-return guard for
+    /// Verify that `run_pre_push_hook_managed` has the correct early-return guard for
     /// `kind = Http`. We test this by confirming Config::fresh() with
     /// `GIT_AI_NOTES_BACKEND_KIND=http` returns Http, and that the guard in
-    /// `push_pre_command_hook` would short-circuit. This is a compile-time
+    /// `run_pre_push_hook_managed` would short-circuit. This is a compile-time
     /// regression guard for the code structure added in Phase 2.6.
     #[test]
     fn push_pre_command_hook_http_guard_is_in_place() {
@@ -768,13 +738,11 @@ mod tests {
             "Config::fresh() should reflect GIT_AI_NOTES_BACKEND_KIND=http"
         );
 
-        // The actual early-return code in push_pre_command_hook and
-        // run_pre_push_hook_managed was added in Phase 2.6. Verify it compiles
-        // and is reachable by checking that the module exposes push_pre_command_hook.
-        // Structural verification: when kind == Http, the function returns None
-        // before even looking at parsed_args. This is verified via code review and
-        // the early-return added at the top of push_pre_command_hook.
-        let _ = crate::commands::hooks::push_hooks::push_pre_command_hook as fn(_, _) -> _;
+        // The actual early-return code in run_pre_push_hook_managed was added
+        // in Phase 2.6. Verify it compiles and is reachable by referencing the
+        // function pointer. Structural verification: when kind == Http, the
+        // function returns before doing any work.
+        let _ = crate::commands::hooks::push_hooks::run_pre_push_hook_managed as fn(_, _);
     }
 
     // --- warm_cache_for_remote tests ---
@@ -827,47 +795,13 @@ mod tests {
         // Build a TmpRepo with two commits.
         let repo = TmpRepo::new().expect("TmpRepo::new");
 
-        let sha1 = {
-            let _f = repo
-                .write_file("warm1.txt", "warm1", false)
-                .expect("write file");
-            let mut index = repo.repo().index().expect("index");
-            index
-                .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
-                .expect("add");
-            index.write().expect("write index");
-            let tree_id = index.write_tree().expect("write tree");
-            let tree = repo.repo().find_tree(tree_id).expect("tree");
-            let sig = git2::Signature::now("T", "t@t.com").expect("sig");
-            repo.repo()
-                .commit(Some("HEAD"), &sig, &sig, "warm-commit-1", &tree, &[])
-                .expect("commit")
-                .to_string()
-        };
+        repo.write_file("warm1.txt", "warm1", false)
+            .expect("write file");
+        let sha1 = repo.commit_all("warm-commit-1").expect("commit 1");
 
-        let sha2 = {
-            let _f = repo
-                .write_file("warm2.txt", "warm2", false)
-                .expect("write file");
-            let mut index = repo.repo().index().expect("index");
-            index
-                .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
-                .expect("add");
-            index.write().expect("write index");
-            let tree_id = index.write_tree().expect("write tree");
-            let tree = repo.repo().find_tree(tree_id).expect("tree");
-            let sig = git2::Signature::now("T", "t@t.com").expect("sig");
-            let parent = repo
-                .repo()
-                .head()
-                .expect("head")
-                .peel_to_commit()
-                .expect("peel");
-            repo.repo()
-                .commit(Some("HEAD"), &sig, &sig, "warm-commit-2", &tree, &[&parent])
-                .expect("commit")
-                .to_string()
-        };
+        repo.write_file("warm2.txt", "warm2", false)
+            .expect("write file");
+        let sha2 = repo.commit_all("warm-commit-2").expect("commit 2");
 
         // Spin up a mockito server that returns notes for both SHAs.
         let mut server = mockito::Server::new();
@@ -973,47 +907,13 @@ mod tests {
         // Build TmpRepo with two commits.
         let repo = TmpRepo::new().expect("TmpRepo::new");
 
-        let sha1 = {
-            let _f = repo
-                .write_file("skip1.txt", "s1", false)
-                .expect("write file");
-            let mut index = repo.repo().index().expect("index");
-            index
-                .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
-                .expect("add");
-            index.write().expect("write index");
-            let tree_id = index.write_tree().expect("write tree");
-            let tree = repo.repo().find_tree(tree_id).expect("tree");
-            let sig = git2::Signature::now("T", "t@t.com").expect("sig");
-            repo.repo()
-                .commit(Some("HEAD"), &sig, &sig, "skip-c1", &tree, &[])
-                .expect("commit")
-                .to_string()
-        };
+        repo.write_file("skip1.txt", "s1", false)
+            .expect("write file");
+        let sha1 = repo.commit_all("skip-c1").expect("commit 1");
 
-        let sha2 = {
-            let _f = repo
-                .write_file("skip2.txt", "s2", false)
-                .expect("write file");
-            let mut index = repo.repo().index().expect("index");
-            index
-                .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
-                .expect("add");
-            index.write().expect("write index");
-            let tree_id = index.write_tree().expect("write tree");
-            let tree = repo.repo().find_tree(tree_id).expect("tree");
-            let sig = git2::Signature::now("T", "t@t.com").expect("sig");
-            let parent = repo
-                .repo()
-                .head()
-                .expect("head")
-                .peel_to_commit()
-                .expect("peel");
-            repo.repo()
-                .commit(Some("HEAD"), &sig, &sig, "skip-c2", &tree, &[&parent])
-                .expect("commit")
-                .to_string()
-        };
+        repo.write_file("skip2.txt", "s2", false)
+            .expect("write file");
+        let sha2 = repo.commit_all("skip-c2").expect("commit 2");
 
         // Pre-populate notes-db with sha1 via the global singleton.
         {

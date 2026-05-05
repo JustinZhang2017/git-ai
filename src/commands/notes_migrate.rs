@@ -368,35 +368,13 @@ mod tests {
     use crate::notes::db::NotesDatabase;
     use tempfile::NamedTempFile;
 
-    /// Helper to create real commits with git notes in a TmpRepo.
-    fn make_commit(
-        repo: &TmpRepo,
-        filename: &str,
-        content: &str,
-        message: &str,
-        parent: Option<&git2::Commit>,
-    ) -> git2::Oid {
-        let _f = repo
-            .write_file(filename, content, false)
+    /// Helper to create real commits in a TmpRepo. Returns the commit SHA.
+    /// Parents are tracked implicitly via `HEAD`, so callers no longer need to
+    /// pass them explicitly.
+    fn make_commit(repo: &TmpRepo, filename: &str, content: &str, message: &str) -> String {
+        repo.write_file(filename, content, false)
             .expect("write file");
-        let mut index = repo.repo().index().expect("index");
-        index
-            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
-            .expect("add all");
-        index.write().expect("write index");
-        let tree_id = index.write_tree().expect("write tree");
-        let tree = repo.repo().find_tree(tree_id).expect("find tree");
-        let sig = git2::Signature::now("Test", "test@example.com").expect("sig");
-        match parent {
-            Some(p) => repo
-                .repo()
-                .commit(Some("HEAD"), &sig, &sig, message, &tree, &[p])
-                .expect("commit"),
-            None => repo
-                .repo()
-                .commit(Some("HEAD"), &sig, &sig, message, &tree, &[])
-                .expect("commit"),
-        }
+        repo.commit_all(message).expect("commit")
     }
 
     /// Add a git note to `refs/notes/ai` for the given commit SHA.
@@ -423,21 +401,9 @@ mod tests {
         // --- Build repo with commits and notes ---
         let repo = TmpRepo::new().expect("TmpRepo::new");
 
-        let sha1 = make_commit(&repo, "file1.txt", "hello", "commit 1", None).to_string();
-        let sha2 = {
-            let parent = repo
-                .repo()
-                .find_commit(git2::Oid::from_str(&sha1).expect("oid1"))
-                .expect("parent1");
-            make_commit(&repo, "file2.txt", "world", "commit 2", Some(&parent)).to_string()
-        };
-        let sha3 = {
-            let parent = repo
-                .repo()
-                .find_commit(git2::Oid::from_str(&sha2).expect("oid2"))
-                .expect("parent2");
-            make_commit(&repo, "file3.txt", "foo", "commit 3", Some(&parent)).to_string()
-        };
+        let sha1 = make_commit(&repo, "file1.txt", "hello", "commit 1");
+        let sha2 = make_commit(&repo, "file2.txt", "world", "commit 2");
+        let sha3 = make_commit(&repo, "file3.txt", "foo", "commit 3");
 
         // Add git notes for each commit.
         add_git_note(&repo, &sha1, "note-content-1");
@@ -553,18 +519,8 @@ mod tests {
     fn list_notes_returns_empty_for_repo_without_notes() {
         let repo = TmpRepo::new().expect("TmpRepo::new");
         // Create a commit so HEAD exists (list_notes on an empty repo might error differently).
-        let _f = repo.write_file("a.txt", "a", false).expect("write file");
-        let mut index = repo.repo().index().expect("index");
-        index
-            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
-            .expect("add");
-        index.write().expect("write");
-        let tree_id = index.write_tree().expect("write_tree");
-        let tree = repo.repo().find_tree(tree_id).expect("find_tree");
-        let sig = git2::Signature::now("T", "t@test.com").expect("sig");
-        repo.repo()
-            .commit(Some("HEAD"), &sig, &sig, "c", &tree, &[])
-            .expect("commit");
+        repo.write_file("a.txt", "a", false).expect("write file");
+        repo.commit_all("c").expect("commit");
 
         let pairs = list_notes(repo.gitai_repo()).expect("list_notes");
         assert!(
