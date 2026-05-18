@@ -17,7 +17,10 @@ pub enum JsonlLineState {
 ///
 /// Returns `Eof` if no more data, `Partial` if the line lacks a trailing newline,
 /// or `Complete(bytes)` on success.
-pub fn read_jsonl_line(reader: &mut impl BufRead, line: &mut String) -> std::io::Result<JsonlLineState> {
+pub fn read_jsonl_line(
+    reader: &mut impl BufRead,
+    line: &mut String,
+) -> std::io::Result<JsonlLineState> {
     line.clear();
     let bytes_read = reader.read_line(line)?;
     if bytes_read == 0 {
