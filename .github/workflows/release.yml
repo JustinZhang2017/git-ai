@@ -74,7 +74,7 @@ jobs:
             bash -c "
               apt-get update && \
               apt-get install -y curl build-essential pkg-config musl-tools && \
-              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --target ${{ matrix.target }} && \
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.93.0 --target ${{ matrix.target }} && \
               . \$HOME/.cargo/env && \
               cargo build --release --target ${{ matrix.target }} && \
               strip target/${{ matrix.target }}/release/git-ai
