@@ -1013,6 +1013,152 @@ fn test_ci_local_rebase_merge_three_commits() {
     );
 }
 
+/// Verify that `git-ai ci local rebase` preserves authorship when an open PR
+/// branch is rebased onto a newer base tip before it is merged. This matches the
+/// shape of GitHub's "Update branch -> Rebase" operation: the PR head is
+/// rewritten, but there is no merge commit yet.
+#[test]
+fn test_ci_local_open_pr_rebase_two_commits() {
+    use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
+
+    let repo = direct_test_repo();
+
+    // --- Initial commit on main ---
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base content"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    repo.git(&["branch", "-M", "main"]).unwrap();
+    let previous_base_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // --- Feature branch: two AI commits touching distinct files ---
+    repo.git_og(&["checkout", "-b", "feature"]).unwrap();
+
+    let mut file_a = repo.filename("file_a.txt");
+    file_a.set_contents(crate::lines!["ai content in file_a".ai()]);
+    let feature_sha1 = repo.stage_all_and_commit("Add file_a").unwrap().commit_sha;
+
+    let mut file_b = repo.filename("file_b.txt");
+    file_b.set_contents(crate::lines!["ai content in file_b".ai()]);
+    let feature_sha2 = repo.stage_all_and_commit("Add file_b").unwrap().commit_sha;
+
+    let previous_head_sha = feature_sha2.clone();
+
+    // --- Advance main so the open-PR rebase produces new SHAs ---
+    repo.git_og(&["checkout", "main"]).unwrap();
+    let mut main_file = repo.filename("main_only.txt");
+    main_file.set_contents(crate::lines!["main-only content"]);
+    repo.git_og(&["add", "main_only.txt"]).unwrap();
+    repo.git_og(&["commit", "-m", "Advance main"]).unwrap();
+    let base_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // --- Rebase the open feature branch onto main, bypassing local hooks ---
+    repo.git_og(&["checkout", "feature"]).unwrap();
+    repo.git_og(&["rebase", "main"]).unwrap();
+
+    let new_sha2 = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let new_sha1 = repo
+        .git_og(&["rev-parse", "HEAD~1"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    assert_ne!(
+        new_sha1, feature_sha1,
+        "open-PR rebase must produce a new SHA for commit 1"
+    );
+    assert_ne!(
+        new_sha2, feature_sha2,
+        "open-PR rebase must produce a new SHA for commit 2"
+    );
+    assert!(
+        repo.read_authorship_note(&new_sha1).is_none(),
+        "bypassed rebase should not pre-create note for commit 1"
+    );
+    assert!(
+        repo.read_authorship_note(&new_sha2).is_none(),
+        "bypassed rebase should not pre-create note for commit 2"
+    );
+
+    // --- Run the new open-PR rebase command ---
+    let output = repo
+        .git_ai(&[
+            "ci",
+            "local",
+            "rebase",
+            "--previous-base-sha",
+            previous_base_sha.as_str(),
+            "--previous-head-sha",
+            previous_head_sha.as_str(),
+            "--base-sha",
+            base_sha.as_str(),
+            "--head-sha",
+            new_sha2.as_str(),
+            "--skip-fetch-notes",
+            "--skip-push",
+        ])
+        .expect("ci local rebase should succeed");
+
+    assert!(
+        output.contains("Local CI (rebase): authorship rewritten successfully"),
+        "Expected authorship rewritten, got: {}",
+        output
+    );
+
+    // --- Verify each rebased open-PR commit carries notes for its own file ---
+    let note1 = repo
+        .read_authorship_note(&new_sha1)
+        .expect("rebased PR commit 1 should have an authorship note");
+    let note2 = repo
+        .read_authorship_note(&new_sha2)
+        .expect("rebased PR commit 2 should have an authorship note");
+
+    let files1: Vec<String> = AuthorshipLog::deserialize_from_string(&note1)
+        .unwrap()
+        .attestations
+        .iter()
+        .map(|a| a.file_path.clone())
+        .collect();
+    let files2: Vec<String> = AuthorshipLog::deserialize_from_string(&note2)
+        .unwrap()
+        .attestations
+        .iter()
+        .map(|a| a.file_path.clone())
+        .collect();
+
+    assert!(
+        files1.iter().any(|f| f.contains("file_a")),
+        "rebased PR commit 1 should reference file_a.txt, got: {:?}",
+        files1
+    );
+    assert!(
+        !files1.iter().any(|f| f.contains("file_b")),
+        "rebased PR commit 1 should not reference file_b.txt, got: {:?}",
+        files1
+    );
+    assert!(
+        files2.iter().any(|f| f.contains("file_b")),
+        "rebased PR commit 2 should reference file_b.txt, got: {:?}",
+        files2
+    );
+    assert!(
+        !files2.iter().any(|f| f.contains("file_a")),
+        "rebased PR commit 2 should not reference file_a.txt, got: {:?}",
+        files2
+    );
+}
+
 /// Standard-human variant of test_ci_squash_merge_basic.
 /// Uses unattributed (checkpoint --) human lines instead of known-human attribution.
 #[test]

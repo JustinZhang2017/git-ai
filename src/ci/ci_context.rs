@@ -32,6 +32,12 @@ pub enum CiEvent {
         /// When set, notes will be fetched from the fork before processing.
         fork_clone_url: Option<String>,
     },
+    Rebase {
+        previous_head_sha: String,
+        previous_base_sha: String,
+        head_sha: String,
+        base_sha: String,
+    },
 }
 
 /// Result of running CiContext
@@ -41,6 +47,11 @@ pub enum CiRunResult {
     AuthorshipRewritten {
         #[allow(dead_code)]
         authorship_log: AuthorshipLog,
+    },
+    /// Authorship was successfully rewritten for one or more rebased commits
+    RebaseAuthorshipRewritten {
+        #[allow(dead_code)]
+        commit_count: usize,
     },
     /// Skipped: merge commit has multiple parents (simple merge - authorship already present)
     SkippedSimpleMerge,
@@ -355,6 +366,98 @@ impl CiContext {
                     }
                 }
             }
+            CiEvent::Rebase {
+                previous_head_sha,
+                previous_base_sha,
+                head_sha,
+                base_sha,
+            } => {
+                println!("Working repository is in {}", self.repo.path().display());
+
+                if options.skip_fetch_notes {
+                    println!("Skipping authorship history fetch");
+                } else {
+                    println!("Fetching authorship history");
+                    fetch_authorship_notes(&self.repo, "origin")?;
+                    println!("Fetched authorship history");
+                }
+
+                if previous_head_sha == head_sha {
+                    println!(
+                        "{} equals previous head {} (no head rewrite)",
+                        head_sha, previous_head_sha
+                    );
+                    return Ok(CiRunResult::SkippedFastForward);
+                }
+                if commit_is_ancestor(&self.repo, previous_head_sha, head_sha)? {
+                    println!(
+                        "{} is an ancestor of {} (fast-forward PR update)",
+                        previous_head_sha, head_sha
+                    );
+                    return Ok(CiRunResult::SkippedFastForward);
+                }
+
+                let original_commits = commits_in_range_oldest_first(
+                    &self.repo,
+                    previous_base_sha,
+                    previous_head_sha,
+                    "previous PR",
+                )?;
+                let new_commits =
+                    commits_in_range_oldest_first(&self.repo, base_sha, head_sha, "current PR")?;
+
+                println!(
+                    "Rewriting authorship for rebased PR head: {} original commits -> {} new commits",
+                    original_commits.len(),
+                    new_commits.len()
+                );
+
+                if original_commits.is_empty() || new_commits.is_empty() {
+                    println!("No AI authorship to track for this PR rebase (empty commit range)");
+                    return Ok(CiRunResult::NoAuthorshipAvailable);
+                }
+
+                let notes_before = count_commits_with_authorship_notes(&self.repo, &new_commits);
+
+                rewrite_authorship_after_rebase_v2(
+                    &self.repo,
+                    previous_head_sha,
+                    &original_commits,
+                    &new_commits,
+                    "",
+                )?;
+                println!("Rewrote authorship.");
+
+                let notes_after = count_commits_with_authorship_notes(&self.repo, &new_commits);
+                if notes_after == 0 {
+                    println!(
+                        "No AI authorship to track for this PR rebase (no AI-touched files in PR)"
+                    );
+                    return Ok(CiRunResult::NoAuthorshipAvailable);
+                }
+
+                if notes_after == notes_before && notes_after == new_commits.len() {
+                    println!("All rebased PR commits already had authorship");
+                    return Ok(CiRunResult::AlreadyExists {
+                        authorship_log: get_reference_as_authorship_log_v3(
+                            &self.repo,
+                            new_commits.last().unwrap(),
+                        )?,
+                    });
+                }
+
+                if options.skip_push {
+                    println!("Skipping authorship push (--skip-push). Done.");
+                } else {
+                    println!("Pushing authorship...");
+                    self.repo.push_authorship("origin")?;
+                    println!("Pushed authorship. Done.");
+                }
+
+                Ok(CiRunResult::RebaseAuthorshipRewritten {
+                    commit_count: notes_after,
+                })
+            }
         }
     }
 
@@ -596,6 +699,47 @@ impl CiContext {
         commits.reverse();
         commits
     }
+}
+
+fn commits_in_range_oldest_first(
+    repo: &Repository,
+    start_sha: &str,
+    end_sha: &str,
+    label: &str,
+) -> Result<Vec<String>, GitAiError> {
+    if start_sha == end_sha {
+        return Ok(Vec::new());
+    }
+
+    let mut commits =
+        CommitRange::new_infer_refname(repo, start_sha.to_string(), end_sha.to_string(), None)
+            .map_err(|e| {
+                GitAiError::Generic(format!(
+                    "Failed to resolve {} commit range {}..{}: {}",
+                    label, start_sha, end_sha, e
+                ))
+            })?
+            .all_commits();
+
+    commits.reverse();
+    Ok(commits)
+}
+
+fn count_commits_with_authorship_notes(repo: &Repository, commits: &[String]) -> usize {
+    commits
+        .iter()
+        .filter(|sha| show_authorship_note(repo, sha).is_some())
+        .count()
+}
+
+fn commit_is_ancestor(
+    repo: &Repository,
+    ancestor_sha: &str,
+    descendant_sha: &str,
+) -> Result<bool, GitAiError> {
+    let ancestor = repo.revparse_single(ancestor_sha)?.id();
+    let merge_base = repo.merge_base(ancestor.clone(), descendant_sha.to_string())?;
+    Ok(merge_base == ancestor)
 }
 
 #[cfg(test)]

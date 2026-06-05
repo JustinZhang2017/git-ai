@@ -9,6 +9,9 @@ fn print_ci_result(result: &CiRunResult, prefix: &str) {
         CiRunResult::AuthorshipRewritten { .. } => {
             println!("{}: authorship rewritten successfully", prefix);
         }
+        CiRunResult::RebaseAuthorshipRewritten { .. } => {
+            println!("{}: authorship rewritten successfully", prefix);
+        }
         CiRunResult::AlreadyExists { .. } => {
             println!("{}: authorship already exists", prefix);
         }
@@ -285,6 +288,72 @@ fn handle_ci_local(args: &[String]) {
             }
             std::process::exit(0);
         }
+        "rebase" => {
+            let skip_fetch_all = has_bool_flag("--skip-fetch");
+            let skip_fetch_notes = skip_fetch_all || has_bool_flag("--skip-fetch-notes");
+            let skip_push = has_bool_flag("--skip-push");
+
+            let previous_head_sha = match flag("--previous-head-sha") {
+                Some(v) => v,
+                None => {
+                    eprintln!("--previous-head-sha is required");
+                    std::process::exit(1);
+                }
+            };
+
+            let previous_base_sha = match flag("--previous-base-sha") {
+                Some(v) => v,
+                None => {
+                    eprintln!("--previous-base-sha is required");
+                    std::process::exit(1);
+                }
+            };
+
+            let head_sha = match flag("--head-sha") {
+                Some(v) => v,
+                None => {
+                    eprintln!("--head-sha is required");
+                    std::process::exit(1);
+                }
+            };
+
+            let base_sha = match flag("--base-sha") {
+                Some(v) => v,
+                None => {
+                    eprintln!("--base-sha is required");
+                    std::process::exit(1);
+                }
+            };
+
+            let ctx = CiContext {
+                repo,
+                event: CiEvent::Rebase {
+                    previous_head_sha,
+                    previous_base_sha,
+                    head_sha,
+                    base_sha,
+                },
+                // Not used for local runs; teardown not invoked
+                temp_dir: std::path::PathBuf::from("."),
+            };
+
+            tracing::debug!("Local CI context: {:?}", ctx);
+            match ctx.run_with_options(CiRunOptions {
+                skip_fetch_notes,
+                skip_fetch_base: true,
+                skip_push,
+            }) {
+                Ok(result) => {
+                    tracing::debug!("Local CI result: {:?}", result);
+                    print_ci_result(&result, "Local CI (rebase)");
+                }
+                Err(e) => {
+                    eprintln!("Error running local CI: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            std::process::exit(0);
+        }
         other => {
             eprintln!("Unknown local CI event: {}", other);
             print_ci_local_help_and_exit();
@@ -313,6 +382,10 @@ fn print_ci_help_and_exit() -> ! {
     eprintln!(
         "                            [--skip-fetch-notes] [--skip-fetch-base] [--skip-fetch-fork-notes] [--skip-fetch] [--skip-push]"
     );
+    eprintln!(
+        "                     rebase --previous-base-sha <sha> --previous-head-sha <sha> --base-sha <sha> --head-sha <sha>"
+    );
+    eprintln!("                            [--skip-fetch-notes] [--skip-fetch] [--skip-push]");
     std::process::exit(1);
 }
 
@@ -328,6 +401,10 @@ fn print_ci_local_help_and_exit() -> ! {
     eprintln!(
         "         [--skip-fetch-notes] [--skip-fetch-base] [--skip-fetch-fork-notes] [--skip-fetch] [--skip-push]"
     );
+    eprintln!(
+        "  rebase --previous-base-sha <sha> --previous-head-sha <sha> --base-sha <sha> --head-sha <sha>"
+    );
+    eprintln!("         [--skip-fetch-notes] [--skip-fetch] [--skip-push]");
     std::process::exit(1);
 }
 

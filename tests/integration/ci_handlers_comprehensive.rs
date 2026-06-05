@@ -30,6 +30,7 @@ fn test_ci_result_types_coverage() {
     let result3 = CiRunResult::SkippedSimpleMerge;
     let result4 = CiRunResult::SkippedFastForward;
     let result5 = CiRunResult::NoAuthorshipAvailable;
+    let result6 = CiRunResult::RebaseAuthorshipRewritten { commit_count: 2 };
 
     // Verify variants can be constructed
     match result1 {
@@ -55,6 +56,11 @@ fn test_ci_result_types_coverage() {
     match result5 {
         CiRunResult::NoAuthorshipAvailable => {}
         _ => panic!("Expected NoAuthorshipAvailable"),
+    }
+
+    match result6 {
+        CiRunResult::RebaseAuthorshipRewritten { commit_count } => assert_eq!(commit_count, 2),
+        _ => panic!("Expected RebaseAuthorshipRewritten"),
     }
 }
 
@@ -94,6 +100,7 @@ fn test_ci_event_merge_structure() {
                 Some("https://example.com/fork.git".to_string())
             );
         }
+        CiEvent::Rebase { .. } => panic!("Expected Merge"),
     }
 }
 
