@@ -201,16 +201,21 @@ pub fn get_github_ci_context() -> Result<Option<CiContext>, GitAiError> {
     }
 
     let repo = find_repository_in_path(&clone_dir.clone())?;
-    let previous_base_sha = repo.merge_base(previous_head_sha.clone(), base_sha.clone())?;
-    let current_base_sha = repo.merge_base(current_head_sha.clone(), base_sha)?;
 
     Ok(Some(CiContext {
         repo,
-        event: CiEvent::Rebase {
+        event: CiEvent::Sync {
             previous_head_sha,
-            previous_base_sha,
             head_sha: current_head_sha,
-            base_sha: current_base_sha,
+            base_ref,
+            base_sha,
+            previous_base_sha: None,
+            previous_head_fetch_remote: Some(
+                authenticated_fork_url
+                    .as_ref()
+                    .unwrap_or(&authenticated_url)
+                    .clone(),
+            ),
         },
         temp_dir: PathBuf::from(clone_dir),
     }))

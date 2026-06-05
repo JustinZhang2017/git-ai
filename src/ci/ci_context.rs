@@ -10,7 +10,9 @@ use crate::git::refs::{
     AI_AUTHORSHIP_FORK_TRACKING_REF, copy_missing_notes_for_commits_from_ref,
     note_blob_oids_for_commits, ref_exists,
 };
-use crate::git::repository::{CommitRange, Repository, exec_git, exec_git_allow_nonzero};
+use crate::git::repository::{
+    CommitRange, Repository, exec_git, exec_git_allow_nonzero, exec_git_stdin,
+};
 use crate::git::sync_authorship::fetch_authorship_notes;
 use std::fs;
 use std::path::PathBuf;
@@ -32,11 +34,13 @@ pub enum CiEvent {
         /// When set, notes will be fetched from the fork before processing.
         fork_clone_url: Option<String>,
     },
-    Rebase {
+    Sync {
         previous_head_sha: String,
-        previous_base_sha: String,
         head_sha: String,
+        base_ref: String,
         base_sha: String,
+        previous_base_sha: Option<String>,
+        previous_head_fetch_remote: Option<String>,
     },
 }
 
@@ -49,7 +53,7 @@ pub enum CiRunResult {
         authorship_log: AuthorshipLog,
     },
     /// Authorship was successfully rewritten for one or more rebased commits
-    RebaseAuthorshipRewritten {
+    SyncAuthorshipRewritten {
         #[allow(dead_code)]
         commit_count: usize,
     },
@@ -57,6 +61,8 @@ pub enum CiRunResult {
     SkippedSimpleMerge,
     /// Skipped: merge commit equals head (fast-forward - no rewrite needed)
     SkippedFastForward,
+    /// Skipped: the PR synchronize event was not a rebase-like rewrite
+    SkippedNonRebaseSync,
     /// Authorship already exists for this commit
     AlreadyExists {
         #[allow(dead_code)]
@@ -73,6 +79,7 @@ pub struct CiRunOptions {
     pub skip_fetch_notes: bool,
     pub skip_fetch_base: bool,
     pub skip_fetch_fork_notes: bool,
+    pub skip_fetch_sync_refs: bool,
     pub skip_push: bool,
 }
 
@@ -366,11 +373,13 @@ impl CiContext {
                     }
                 }
             }
-            CiEvent::Rebase {
+            CiEvent::Sync {
                 previous_head_sha,
-                previous_base_sha,
                 head_sha,
+                base_ref,
                 base_sha,
+                previous_base_sha,
+                previous_head_fetch_remote,
             } => {
                 println!("Working repository is in {}", self.repo.path().display());
 
@@ -389,6 +398,21 @@ impl CiContext {
                     );
                     return Ok(CiRunResult::SkippedFastForward);
                 }
+                ensure_commit_available_for_sync(
+                    &self.repo,
+                    previous_head_sha,
+                    previous_head_fetch_remote.as_deref().unwrap_or("origin"),
+                    "refs/git-ai/ci-sync/previous-head",
+                    options.skip_fetch_sync_refs,
+                )?;
+                ensure_commit_available_for_sync(
+                    &self.repo,
+                    head_sha,
+                    "origin",
+                    "refs/git-ai/ci-sync/head",
+                    options.skip_fetch_sync_refs,
+                )?;
+
                 if commit_is_ancestor(&self.repo, previous_head_sha, head_sha)? {
                     println!(
                         "{} is an ancestor of {} (fast-forward PR update)",
@@ -397,17 +421,39 @@ impl CiContext {
                     return Ok(CiRunResult::SkippedFastForward);
                 }
 
+                let base_target =
+                    if !base_sha.is_empty() && self.repo.revparse_single(base_sha).is_ok() {
+                        base_sha.as_str()
+                    } else {
+                        base_ref.as_str()
+                    };
+                let resolved_previous_base_sha = match previous_base_sha {
+                    Some(previous_base_sha) if !previous_base_sha.is_empty() => {
+                        previous_base_sha.clone()
+                    }
+                    _ => self
+                        .repo
+                        .merge_base(previous_head_sha.clone(), base_target.to_string())?,
+                };
+                let resolved_base_sha = self
+                    .repo
+                    .merge_base(head_sha.clone(), base_target.to_string())?;
+
                 let original_commits = commits_in_range_oldest_first(
                     &self.repo,
-                    previous_base_sha,
+                    &resolved_previous_base_sha,
                     previous_head_sha,
                     "previous PR",
                 )?;
-                let new_commits =
-                    commits_in_range_oldest_first(&self.repo, base_sha, head_sha, "current PR")?;
+                let new_commits = commits_in_range_oldest_first(
+                    &self.repo,
+                    &resolved_base_sha,
+                    head_sha,
+                    "current PR",
+                )?;
 
                 println!(
-                    "Rewriting authorship for rebased PR head: {} original commits -> {} new commits",
+                    "Detected non-fast-forward PR sync: {} original commits -> {} new commits",
                     original_commits.len(),
                     new_commits.len()
                 );
@@ -416,6 +462,19 @@ impl CiContext {
                     println!("No AI authorship to track for this PR rebase (empty commit range)");
                     return Ok(CiRunResult::NoAuthorshipAvailable);
                 }
+
+                if !commit_ranges_have_same_patch_ids(&self.repo, &original_commits, &new_commits)?
+                {
+                    println!(
+                        "Skipping PR sync authorship rewrite: previous and current commit ranges are not rebase-equivalent"
+                    );
+                    return Ok(CiRunResult::SkippedNonRebaseSync);
+                }
+
+                println!(
+                    "Rewriting authorship for rebased PR head: {} -> {}",
+                    previous_head_sha, head_sha
+                );
 
                 let notes_before = count_commits_with_authorship_notes(&self.repo, &new_commits);
 
@@ -454,7 +513,7 @@ impl CiContext {
                     println!("Pushed authorship. Done.");
                 }
 
-                Ok(CiRunResult::RebaseAuthorshipRewritten {
+                Ok(CiRunResult::SyncAuthorshipRewritten {
                     commit_count: notes_after,
                 })
             }
@@ -730,6 +789,93 @@ fn count_commits_with_authorship_notes(repo: &Repository, commits: &[String]) ->
         .iter()
         .filter(|sha| show_authorship_note(repo, sha).is_some())
         .count()
+}
+
+fn ensure_commit_available_for_sync(
+    repo: &Repository,
+    commit_sha: &str,
+    fetch_remote: &str,
+    fetch_ref: &str,
+    skip_fetch: bool,
+) -> Result<(), GitAiError> {
+    if repo.revparse_single(commit_sha).is_ok() {
+        return Ok(());
+    }
+    if skip_fetch {
+        return Err(GitAiError::Generic(format!(
+            "Commit {} is not available locally and sync ref fetch is disabled",
+            commit_sha
+        )));
+    }
+
+    println!("Fetching PR sync commit {} into {}", commit_sha, fetch_ref);
+    let mut args = repo.global_args_for_exec();
+    args.push("fetch".to_string());
+    args.push("--filter=blob:none".to_string());
+    args.push("--no-tags".to_string());
+    args.push(fetch_remote.to_string());
+    args.push(format!("{}:{}", commit_sha, fetch_ref));
+    exec_git(&args)?;
+    repo.revparse_single(commit_sha)?;
+    Ok(())
+}
+
+fn stable_patch_id_for_commit(repo: &Repository, commit_sha: &str) -> Result<String, GitAiError> {
+    let mut show_args = repo.global_args_for_exec();
+    show_args.extend(
+        [
+            "show",
+            "--format=",
+            "--no-notes",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "--diff-algorithm=default",
+            "--indent-heuristic",
+            commit_sha,
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
+    let patch = exec_git(&show_args)?;
+
+    let mut patch_id_args = repo.global_args_for_exec();
+    patch_id_args.push("patch-id".to_string());
+    patch_id_args.push("--stable".to_string());
+    let patch_id_output = exec_git_stdin(&patch_id_args, &patch.stdout)?;
+    let stdout = String::from_utf8_lossy(&patch_id_output.stdout);
+    let patch_id = stdout
+        .split_whitespace()
+        .next()
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "empty-patch".to_string());
+    Ok(patch_id)
+}
+
+fn stable_patch_ids_for_commits(
+    repo: &Repository,
+    commit_shas: &[String],
+) -> Result<Vec<String>, GitAiError> {
+    commit_shas
+        .iter()
+        .map(|sha| stable_patch_id_for_commit(repo, sha))
+        .collect()
+}
+
+fn commit_ranges_have_same_patch_ids(
+    repo: &Repository,
+    original_commits: &[String],
+    new_commits: &[String],
+) -> Result<bool, GitAiError> {
+    if original_commits.len() != new_commits.len() {
+        return Ok(false);
+    }
+
+    let original_patch_ids = stable_patch_ids_for_commits(repo, original_commits)?;
+    let new_patch_ids = stable_patch_ids_for_commits(repo, new_commits)?;
+    Ok(original_patch_ids == new_patch_ids)
 }
 
 fn commit_is_ancestor(
