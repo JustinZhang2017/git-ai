@@ -185,7 +185,9 @@ pub fn get_github_ci_context() -> Result<Option<CiContext>, GitAiError> {
     .is_ok();
 
     if !previous_head_is_local {
-        let previous_head_fetch_url = authenticated_fork_url.as_ref().unwrap_or(&authenticated_url);
+        let previous_head_fetch_url = authenticated_fork_url
+            .as_ref()
+            .unwrap_or(&authenticated_url);
         exec_git(&[
             "-C".to_string(),
             clone_dir.clone(),

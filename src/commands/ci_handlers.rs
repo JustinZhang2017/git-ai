@@ -341,6 +341,7 @@ fn handle_ci_local(args: &[String]) {
             match ctx.run_with_options(CiRunOptions {
                 skip_fetch_notes,
                 skip_fetch_base: true,
+                skip_fetch_fork_notes: false,
                 skip_push,
             }) {
                 Ok(result) => {

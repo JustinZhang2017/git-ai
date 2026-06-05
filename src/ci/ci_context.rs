@@ -10,7 +10,7 @@ use crate::git::refs::{
     AI_AUTHORSHIP_FORK_TRACKING_REF, copy_missing_notes_for_commits_from_ref,
     note_blob_oids_for_commits, ref_exists,
 };
-use crate::git::repository::{CommitRange, Repository, exec_git};
+use crate::git::repository::{CommitRange, Repository, exec_git, exec_git_allow_nonzero};
 use crate::git::sync_authorship::fetch_authorship_notes;
 use std::fs;
 use std::path::PathBuf;
@@ -738,13 +738,30 @@ fn commit_is_ancestor(
     descendant_sha: &str,
 ) -> Result<bool, GitAiError> {
     let ancestor = repo.revparse_single(ancestor_sha)?.id();
-    let merge_base = repo.merge_base(ancestor.clone(), descendant_sha.to_string())?;
-    Ok(merge_base == ancestor)
+    let descendant = repo.revparse_single(descendant_sha)?.id();
+
+    let mut args = repo.global_args_for_exec();
+    args.push("merge-base".to_string());
+    args.push("--is-ancestor".to_string());
+    args.push(ancestor);
+    args.push(descendant);
+
+    let output = exec_git_allow_nonzero(&args)?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        code => Err(GitAiError::GitCliError {
+            code,
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            args,
+        }),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::test_utils::TmpRepo;
 
     #[test]
     fn test_ci_event_debug() {
@@ -776,5 +793,38 @@ mod tests {
         let result3 = CiRunResult::NoAuthorshipAvailable;
         let debug_str3 = format!("{:?}", result3);
         assert!(debug_str3.contains("NoAuthorshipAvailable"));
+    }
+
+    #[test]
+    fn commit_is_ancestor_returns_false_for_unrelated_histories() {
+        let repo = TmpRepo::new().expect("test repo");
+        repo.write_file("main.txt", "main", false)
+            .expect("write main");
+        let main_sha = repo.commit_all("main commit").expect("main commit");
+
+        repo.git_command(&["switch", "--orphan", "unrelated"])
+            .expect("orphan branch");
+        repo.git_command(&["rm", "-rf", "--ignore-unmatch", "."])
+            .expect("clear tree");
+        repo.write_file("unrelated.txt", "unrelated", false)
+            .expect("write unrelated");
+        let unrelated_sha = repo
+            .commit_all("unrelated commit")
+            .expect("unrelated commit");
+
+        assert!(
+            !commit_is_ancestor(repo.gitai_repo(), &main_sha, &unrelated_sha)
+                .expect("unrelated histories should not error")
+        );
+    }
+
+    #[test]
+    fn commit_is_ancestor_errors_for_invalid_descendant() {
+        let repo = TmpRepo::new().expect("test repo");
+        repo.write_file("main.txt", "main", false)
+            .expect("write main");
+        let main_sha = repo.commit_all("main commit").expect("main commit");
+
+        assert!(commit_is_ancestor(repo.gitai_repo(), &main_sha, "not-a-sha").is_err());
     }
 }
