@@ -163,11 +163,13 @@ namespace GitAiVS.Listeners
 
                 Debug.WriteLine($"[git-ai] Triggering ai_agent checkpoint for {agentName} on {relativePath}");
 
-                _ = CheckpointSvc?.SendAfterEditAsync(
+#pragma warning disable VSTHRD110
+                CheckpointSvc?.SendAfterEditAsync(
                     workspaceRoot,
                     new[] { relativePath },
                     agentName,
                     dirtyFiles);
+#pragma warning restore VSTHRD110
             }, TaskScheduler.Default);
         }
 

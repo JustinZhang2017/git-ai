@@ -143,13 +143,13 @@ namespace GitAiVS
 
         protected override void Dispose(bool disposing)
         {
+            ThreadHelper.ThrowIfNotOnUIThread();
             if (disposing)
             {
                 _saveListener?.Dispose();
 
                 if (_rdtCookie != 0)
                 {
-                    ThreadHelper.ThrowIfNotOnUIThread();
                     var rdt = GetService(typeof(SVsRunningDocumentTable)) as IVsRunningDocumentTable;
                     rdt?.UnadviseRunningDocTableEvents(_rdtCookie);
                 }
