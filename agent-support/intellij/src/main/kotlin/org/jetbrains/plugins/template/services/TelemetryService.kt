@@ -174,7 +174,7 @@ class TelemetryService : Disposable {
         try {
             Sentry.init { options ->
                 options.dsn = SENTRY_DSN
-                options.release = getPluginVersion()
+                options.release = pluginVersion
                 options.environment = "production"
                 options.tracesSampleRate = 0.3
                 options.setTag("ide", "intellij")
@@ -252,14 +252,12 @@ class TelemetryService : Disposable {
         }
     }
 
-    private fun getPluginVersion(): String = pluginVersion
-
     private fun getCommonProperties(): Map<String, Any> {
         return mapOf(
             "ide" to "intellij",
             "ide_version" to ApplicationInfo.getInstance().fullVersion,
             "ide_build" to ApplicationInfo.getInstance().build.asString(),
-            "plugin_version" to getPluginVersion(),
+            "plugin_version" to pluginVersion,
             "os" to (System.getProperty("os.name") ?: "unknown"),
             "arch" to (System.getProperty("os.arch") ?: "unknown")
         )
