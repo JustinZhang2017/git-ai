@@ -60,7 +60,7 @@ namespace GitAiVS.Listeners
         private const int DebounceMs = 300;
         private const long BeforeEditExpiryMs = 5000;
 
-        internal CheckpointService? CheckpointSvc { get; set; }
+        private CheckpointService? CheckpointSvc => CheckpointService.Current;
 
         public void VsTextViewCreated(IVsTextView textViewAdapter)
         {

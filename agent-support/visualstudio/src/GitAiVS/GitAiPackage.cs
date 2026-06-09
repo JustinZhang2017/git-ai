@@ -56,8 +56,8 @@ namespace GitAiVS
             System.Diagnostics.Trace.WriteLine($"[git-ai] Found git-ai at {binaryPath} (version {_binaryResolver.ResolvedVersion})");
 
             _checkpointService = new CheckpointService(_binaryResolver);
+            CheckpointService.Current = _checkpointService;
 
-            WireTextBufferListener();
             SubscribeToSaveEvents();
 
             System.Diagnostics.Trace.WriteLine("[git-ai] GitAiPackage initialized successfully.");
@@ -65,36 +65,6 @@ namespace GitAiVS
             catch (Exception ex)
             {
                 System.Diagnostics.Trace.WriteLine($"[git-ai] FATAL: InitializeAsync failed: {ex}");
-            }
-        }
-
-        /// <summary>
-        /// Find the MEF-exported TextBufferListener and inject our CheckpointService.
-        /// </summary>
-        private void WireTextBufferListener()
-        {
-            ThreadHelper.ThrowIfNotOnUIThread();
-
-            var componentModel = GetService(typeof(Microsoft.VisualStudio.ComponentModelHost.SComponentModel))
-                as Microsoft.VisualStudio.ComponentModelHost.IComponentModel;
-
-            if (componentModel == null)
-            {
-                System.Diagnostics.Trace.WriteLine("[git-ai] Could not get component model to wire TextBufferListener");
-                return;
-            }
-
-            var listener = componentModel.DefaultExportProvider
-                .GetExportedValueOrDefault<TextBufferListener>();
-
-            if (listener != null)
-            {
-                listener.CheckpointSvc = _checkpointService;
-                System.Diagnostics.Trace.WriteLine("[git-ai] TextBufferListener wired with CheckpointService");
-            }
-            else
-            {
-                System.Diagnostics.Trace.WriteLine("[git-ai] TextBufferListener not found in MEF exports");
             }
         }
 

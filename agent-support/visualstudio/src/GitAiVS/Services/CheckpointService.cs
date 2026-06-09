@@ -14,6 +14,12 @@ namespace GitAiVS.Services
         private readonly BinaryResolver _resolver;
         private readonly string _sessionId;
 
+        /// <summary>
+        /// Global singleton so MEF-created components (TextBufferListener) can access it
+        /// without manual wiring. Set by GitAiPackage during initialization.
+        /// </summary>
+        public static CheckpointService? Current { get; set; }
+
         public CheckpointService(BinaryResolver resolver)
         {
             _resolver = resolver;
