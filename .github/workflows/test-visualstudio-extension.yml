@@ -31,16 +31,18 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@9a946fdbd5fb07b82b2f5a4466058b876ab72bb2 # v5
-        with:
-          dotnet-version: '8.0.x'
-
-      - name: Restore dependencies
-        run: dotnet restore src/GitAiVS/GitAiVS.csproj
-
       - name: Build extension
-        run: dotnet build src/GitAiVS/GitAiVS.csproj --no-restore --configuration Release
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $msbuild = & $vswhere -latest -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" | Select-Object -First 1
+          if (-not $msbuild) {
+            throw "MSBuild.exe not found"
+          }
+
+          & $msbuild "src\GitAiVS\GitAiVS.csproj" "/restore" "/p:Configuration=Release" "/m"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
 
   test:
     name: Test
@@ -53,10 +55,38 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@9a946fdbd5fb07b82b2f5a4466058b876ab72bb2 # v5
-        with:
-          dotnet-version: '8.0.x'
+      - name: Build tests
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $msbuild = & $vswhere -latest -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" | Select-Object -First 1
+          if (-not $msbuild) {
+            throw "MSBuild.exe not found"
+          }
+
+          & $msbuild "src\GitAiVS.Tests\GitAiVS.Tests.csproj" "/restore" "/p:Configuration=Release" "/m"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
 
       - name: Run Tests
-        run: dotnet test src/GitAiVS.Tests/GitAiVS.Tests.csproj --verbosity normal
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsRoot = & $vswhere -latest -requires Microsoft.Component.MSBuild -property installationPath
+          if (-not $vsRoot) {
+            throw "Visual Studio installation not found"
+          }
+
+          $vstest = Join-Path $vsRoot "Common7\IDE\CommonExtensions\Microsoft\TestWindow\vstest.console.exe"
+          if (-not (Test-Path $vstest)) {
+            throw "vstest.console.exe not found at $vstest"
+          }
+
+          $testAssembly = Get-ChildItem -Path "src\GitAiVS.Tests\bin\Release" -Recurse -Filter "GitAiVS.Tests.dll" | Select-Object -First 1
+          if (-not $testAssembly) {
+            throw "GitAiVS.Tests.dll not found"
+          }
+
+          & $vstest $testAssembly.FullName "/TestAdapterPath:$($testAssembly.Directory.FullName)"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
