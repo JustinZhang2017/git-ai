@@ -40,6 +40,29 @@ function ConvertTo-CmdPath {
     return '"' + ($Path -replace '"', '\"') + '"'
 }
 
+function Read-CapturedLines {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path $Path)) {
+        return @()
+    }
+
+    for ($attempt = 1; $attempt -le 10; $attempt++) {
+        try {
+            return @([System.IO.File]::ReadAllLines($Path))
+        } catch {
+            if ($attempt -eq 10) {
+                throw
+            }
+
+            Start-Sleep -Milliseconds 500
+        }
+    }
+}
+
 function Invoke-CargoCaptured {
     param(
         [Parameter(Mandatory = $true)]
@@ -89,16 +112,8 @@ function Invoke-CargoCaptured {
             $process.WaitForExit()
         }
 
-        $stdoutLines = if (Test-Path $stdoutFile) {
-            @([System.IO.File]::ReadAllLines($stdoutFile))
-        } else {
-            @()
-        }
-        $stderrLines = if (Test-Path $stderrFile) {
-            @([System.IO.File]::ReadAllLines($stderrFile))
-        } else {
-            @()
-        }
+        $stdoutLines = Read-CapturedLines -Path $stdoutFile
+        $stderrLines = Read-CapturedLines -Path $stderrFile
 
         foreach ($line in $stdoutLines) {
             [Console]::Out.WriteLine($line)
