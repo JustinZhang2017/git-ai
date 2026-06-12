@@ -14,6 +14,9 @@ const SELF_CHECK_FILE: &str = "git-ai-debug-self-check.txt";
 const SELF_CHECK_CONTENT_UNTRACKED: &str = "Untracked line\n";
 const SELF_CHECK_CONTENT_KNOWN_HUMAN: &str = "Untracked line\nKnown human line\n";
 const SELF_CHECK_CONTENT_AI: &str = "Untracked line\nKnown human line\nAI line\n";
+const TRACE2_EVENT_TARGET_KEY: &str = "trace2.eventTarget";
+const TRACE2_EVENT_NESTING_KEY: &str = "trace2.eventNesting";
+const TRACE2_EVENT_NESTING_VALUE: &str = "10";
 const CHECKPOINT_WAIT: Duration = Duration::from_secs(10);
 const NOTE_WAIT: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -105,6 +108,86 @@ impl GitDiagnosticTarget {
             program: program.into(),
         }
     }
+}
+
+pub fn check_trace2_global_config(target: &GitDiagnosticTarget) -> DiagnosticCheckResult {
+    let mut commands = Vec::new();
+    let expected_target = match crate::daemon::DaemonConfig::from_env_or_default_paths() {
+        Ok(config) => config.trace2_event_target(),
+        Err(err) => {
+            return DiagnosticCheckResult::failed(
+                "trace2 global config could not be inspected",
+                trace2_config_failure_details(
+                    &format!("failed to determine expected trace2 target: {}", err),
+                    None,
+                    None,
+                    None,
+                ),
+                commands,
+            );
+        }
+    };
+
+    let event_targets =
+        read_global_git_config_values(&mut commands, &target.program, TRACE2_EVENT_TARGET_KEY);
+    let event_nesting =
+        read_global_git_config_values(&mut commands, &target.program, TRACE2_EVENT_NESTING_KEY);
+
+    let event_targets = match event_targets {
+        Ok(values) => values,
+        Err(err) => {
+            return DiagnosticCheckResult::failed(
+                "trace2 global config could not be inspected",
+                trace2_config_failure_details(&err, Some(&expected_target), None, None),
+                commands,
+            );
+        }
+    };
+    let event_nesting = match event_nesting {
+        Ok(values) => values,
+        Err(err) => {
+            return DiagnosticCheckResult::failed(
+                "trace2 global config could not be inspected",
+                trace2_config_failure_details(
+                    &err,
+                    Some(&expected_target),
+                    Some(&event_targets),
+                    None,
+                ),
+                commands,
+            );
+        }
+    };
+
+    let target_matches = event_targets.iter().any(|value| value == &expected_target);
+    let nesting_matches = event_nesting
+        .iter()
+        .any(|value| value == TRACE2_EVENT_NESTING_VALUE);
+
+    if target_matches && nesting_matches {
+        return DiagnosticCheckResult::passed(
+            "trace2 global config is configured",
+            vec![
+                format!("{}: {}", TRACE2_EVENT_TARGET_KEY, expected_target),
+                format!(
+                    "{}: {}",
+                    TRACE2_EVENT_NESTING_KEY, TRACE2_EVENT_NESTING_VALUE
+                ),
+            ],
+            commands,
+        );
+    }
+
+    DiagnosticCheckResult::failed(
+        "trace2 global config is not configured",
+        trace2_config_failure_details(
+            "trace2 is not configured for git-ai daemon mode",
+            Some(&expected_target),
+            Some(&event_targets),
+            Some(&event_nesting),
+        ),
+        commands,
+    )
 }
 
 pub fn run_attribution_self_check(target: &GitDiagnosticTarget) -> DiagnosticCheckResult {
@@ -253,7 +336,7 @@ pub fn run_trace2_file_self_check(target: &GitDiagnosticTarget) -> DiagnosticChe
                 "config",
                 "--global",
                 "--replace-all",
-                "trace2.eventTarget",
+                TRACE2_EVENT_TARGET_KEY,
                 trace_path_string.as_str(),
             ],
             None,
@@ -565,7 +648,7 @@ fn snapshot_global_trace2_event_target(
             "--global",
             "--no-includes",
             "--get-all",
-            "trace2.eventTarget",
+            TRACE2_EVENT_TARGET_KEY,
         ],
         None,
     );
@@ -581,7 +664,8 @@ fn snapshot_global_trace2_event_target(
         Vec::new()
     } else {
         let err = format!(
-            "failed to snapshot global trace2.eventTarget: status={}, stderr={}",
+            "failed to snapshot global {}: status={}, stderr={}",
+            TRACE2_EVENT_TARGET_KEY,
             format_status(record.status),
             record.stderr
         );
@@ -599,7 +683,7 @@ fn restore_global_trace2_event_target(
 ) -> Result<(), String> {
     let remove = run_logged_command(
         git_program,
-        &["config", "--global", "--unset-all", "trace2.eventTarget"],
+        &["config", "--global", "--unset-all", TRACE2_EVENT_TARGET_KEY],
         None,
     );
     let remove_ok = remove.success() || remove.status == Some(5);
@@ -607,7 +691,8 @@ fn restore_global_trace2_event_target(
         None
     } else {
         Some(format!(
-            "failed to remove temporary trace2.eventTarget: status={}, stderr={}",
+            "failed to remove temporary {}: status={}, stderr={}",
+            TRACE2_EVENT_TARGET_KEY,
             format_status(remove.status),
             remove.stderr
         ))
@@ -620,14 +705,21 @@ fn restore_global_trace2_event_target(
     for value in &snapshot.values {
         let record = run_logged_command(
             git_program,
-            &["config", "--global", "--add", "trace2.eventTarget", value],
+            &[
+                "config",
+                "--global",
+                "--add",
+                TRACE2_EVENT_TARGET_KEY,
+                value,
+            ],
             None,
         );
         let error = if record.success() {
             None
         } else {
             Some(format!(
-                "failed to restore trace2.eventTarget: status={}, stderr={}",
+                "failed to restore {}: status={}, stderr={}",
+                TRACE2_EVENT_TARGET_KEY,
                 format_status(record.status),
                 record.stderr
             ))
@@ -706,6 +798,85 @@ fn validate_trace2_command_events(
     ])
 }
 
+fn read_global_git_config_values(
+    commands: &mut Vec<CommandRecord>,
+    git_program: &str,
+    key: &str,
+) -> Result<Vec<String>, String> {
+    let record = run_logged_command(git_program, &["config", "--global", "--get-all", key], None);
+    let values = if record.success() {
+        record
+            .stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect()
+    } else if record.status == Some(1) {
+        Vec::new()
+    } else {
+        let err = format!(
+            "failed to read global {}: status={}, stderr={}",
+            key,
+            format_status(record.status),
+            record.stderr
+        );
+        commands.push(record);
+        return Err(err);
+    };
+    commands.push(record);
+    Ok(values)
+}
+
+fn trace2_config_failure_details(
+    reason: &str,
+    expected_target: Option<&str>,
+    actual_targets: Option<&[String]>,
+    actual_nesting: Option<&[String]>,
+) -> Vec<String> {
+    let mut details = vec![
+        format!("ERROR: {}", reason),
+        "Why this matters: git-ai daemon mode relies on Git trace2 events to match real Git commands to checkpoint and authorship state; without this config, commit/rebase/merge attribution can be missed or delayed.".to_string(),
+    ];
+
+    if let Some(expected_target) = expected_target {
+        details.push(format!(
+            "Expected {}: {}",
+            TRACE2_EVENT_TARGET_KEY, expected_target
+        ));
+    }
+    if let Some(actual_targets) = actual_targets {
+        details.push(format!(
+            "Actual {}: {}",
+            TRACE2_EVENT_TARGET_KEY,
+            format_config_values(actual_targets)
+        ));
+    }
+    details.push(format!(
+        "Expected {}: {}",
+        TRACE2_EVENT_NESTING_KEY, TRACE2_EVENT_NESTING_VALUE
+    ));
+    if let Some(actual_nesting) = actual_nesting {
+        details.push(format!(
+            "Actual {}: {}",
+            TRACE2_EVENT_NESTING_KEY,
+            format_config_values(actual_nesting)
+        ));
+    }
+
+    details.push("Common causes: `git-ai install-hooks` has not run, was run with `--dry-run`, or failed while writing global Git config.".to_string());
+    details.push("Common causes: git-ai cannot edit the same global Git config Git reads because HOME/USERPROFILE/XDG_CONFIG_HOME/GIT_CONFIG_GLOBAL points somewhere different, the global config file or parent directory is read-only or locked, permissions or ownership are wrong, or the configured git and terminal git use different config locations.".to_string());
+    details
+}
+
+fn format_config_values(values: &[String]) -> String {
+    if values.is_empty() {
+        "<missing>".to_string()
+    } else {
+        values.join(", ")
+    }
+}
+
 fn sanitize_label(label: &str) -> String {
     let sanitized = label
         .chars()
@@ -777,5 +948,38 @@ mod tests {
 
         let err = validate_trace2_command_events(trace, "init").unwrap_err();
         assert!(err.contains("missing cmd_name event for expected command"));
+    }
+
+    #[test]
+    fn test_trace2_config_failure_details_explains_missing_config() {
+        let empty = Vec::new();
+        let details = trace2_config_failure_details(
+            "trace2 is not configured for git-ai daemon mode",
+            Some("af_unix:stream:/tmp/git-ai-trace2.sock"),
+            Some(&empty),
+            Some(&empty),
+        );
+
+        assert!(details[0].contains("ERROR: trace2 is not configured"));
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("Why this matters"))
+        );
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail == "Actual trace2.eventTarget: <missing>")
+        );
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail == "Actual trace2.eventNesting: <missing>")
+        );
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("Common causes"))
+        );
     }
 }

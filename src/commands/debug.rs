@@ -8,6 +8,13 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+const MIN_GIT_VERSION: GitVersion = GitVersion {
+    major: 2,
+    minor: 22,
+    patch: 0,
+};
+const MIN_GIT_VERSION_DISPLAY: &str = "2.22.0";
+
 pub fn handle_debug(args: &[String]) {
     if args
         .iter()
@@ -42,6 +49,7 @@ fn build_debug_report() -> String {
     let shell_git_lookup = collect_shell_git_lookup();
     let git_diagnostics = collect_git_diagnostics(&git_cmd);
     let git_version = run_command_capture(&git_cmd, &["--version"]);
+    let shell_git_version = run_command_capture("git", &["--version"]);
     let git_config = collect_git_config_dump(&git_cmd);
     let git_ai_config = collect_git_ai_config_dump();
     let platform_info = collect_platform_info();
@@ -89,12 +97,32 @@ fn build_debug_report() -> String {
             let _ = writeln!(out, "Shell git realpath: <unavailable>");
         }
     }
-    match git_version {
+    match &git_version {
         Ok(version) => {
             let _ = writeln!(out, "Git version: {}", version);
+            append_git_version_check(&mut out, "Git version check", version);
         }
         Err(err) => {
             let _ = writeln!(out, "Git version: <error: {}>", err);
+            let _ = writeln!(
+                out,
+                "Git version check: <error: unable to verify minimum version {}>",
+                MIN_GIT_VERSION_DISPLAY
+            );
+        }
+    }
+    match &shell_git_version {
+        Ok(version) => {
+            let _ = writeln!(out, "Shell git version: {}", version);
+            append_git_version_check(&mut out, "Shell git version check", version);
+        }
+        Err(err) => {
+            let _ = writeln!(out, "Shell git version: <error: {}>", err);
+            let _ = writeln!(
+                out,
+                "Shell git version check: <error: unable to verify minimum version {}>",
+                MIN_GIT_VERSION_DISPLAY
+            );
         }
     }
     let _ = writeln!(out);
@@ -310,6 +338,7 @@ fn build_debug_report() -> String {
 
 struct GitDebugDiagnostics {
     target: GitDiagnosticTarget,
+    trace2_config: DiagnosticCheckResult,
     attribution: DiagnosticCheckResult,
     trace2: DiagnosticCheckResult,
 }
@@ -323,10 +352,12 @@ fn collect_git_diagnostics(configured_git: &str) -> Vec<GitDebugDiagnostics> {
     targets
         .into_iter()
         .map(|target| {
+            let trace2_config = crate::diagnostics::check_trace2_global_config(&target);
             let attribution = crate::diagnostics::run_attribution_self_check(&target);
             let trace2 = crate::diagnostics::run_trace2_file_self_check(&target);
             GitDebugDiagnostics {
                 target,
+                trace2_config,
                 attribution,
                 trace2,
             }
@@ -342,6 +373,7 @@ fn append_git_diagnostics(out: &mut String, diagnostics: &[GitDebugDiagnostics])
             "{} (program: {})",
             diagnostic.target.label, diagnostic.target.program
         );
+        append_diagnostic_check(out, "Trace2 config check", &diagnostic.trace2_config, false);
         append_diagnostic_check(
             out,
             "Attribution self-check",
@@ -399,6 +431,74 @@ fn append_diagnostic_check(
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct GitVersion {
+    major: u32,
+    minor: u32,
+    patch: u32,
+}
+
+impl std::fmt::Display for GitVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
+fn append_git_version_check(out: &mut String, label: &str, version_output: &str) {
+    match parse_git_version(version_output) {
+        Some(version) if version >= MIN_GIT_VERSION => {
+            let _ = writeln!(
+                out,
+                "{}: version meets or exceeds minimum version of {}",
+                label, MIN_GIT_VERSION_DISPLAY
+            );
+        }
+        Some(version) => {
+            let _ = writeln!(
+                out,
+                "{}: ERROR: detected Git version {} is below minimum version {}",
+                label, version, MIN_GIT_VERSION_DISPLAY
+            );
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "{}: <error: could not parse Git version from '{}'; minimum version is {}>",
+                label, version_output, MIN_GIT_VERSION_DISPLAY
+            );
+        }
+    }
+}
+
+fn parse_git_version(output: &str) -> Option<GitVersion> {
+    output.split_whitespace().find_map(parse_git_version_token)
+}
+
+fn parse_git_version_token(token: &str) -> Option<GitVersion> {
+    let token = token.trim_start_matches('v');
+    let mut parts = token.split('.');
+    let major = parse_leading_u32(parts.next()?)?;
+    let minor = parse_leading_u32(parts.next()?)?;
+    let patch = parts.next().map(parse_leading_u32).unwrap_or(Some(0))?;
+
+    Some(GitVersion {
+        major,
+        minor,
+        patch,
+    })
+}
+
+fn parse_leading_u32(value: &str) -> Option<u32> {
+    let digits = value
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 struct ShellGitLookup {
@@ -934,6 +1034,32 @@ mod tests {
     #[test]
     fn test_format_bytes() {
         assert_eq!(format_bytes(1024), "1.00 KB (1024 bytes)");
+    }
+
+    #[test]
+    fn test_parse_git_version_handles_platform_suffixes() {
+        assert_eq!(
+            parse_git_version("git version 2.54.0.windows.1"),
+            Some(GitVersion {
+                major: 2,
+                minor: 54,
+                patch: 0
+            })
+        );
+        assert_eq!(
+            parse_git_version("git version 2.39.5 (Apple Git-154)"),
+            Some(GitVersion {
+                major: 2,
+                minor: 39,
+                patch: 5
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_git_version_accepts_minimum_version() {
+        assert!(parse_git_version("git version 2.22.0").unwrap() >= MIN_GIT_VERSION);
+        assert!(parse_git_version("git version 2.21.9").unwrap() < MIN_GIT_VERSION);
     }
 
     #[test]
