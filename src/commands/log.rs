@@ -811,7 +811,49 @@ fn draw_pager(
 }
 
 fn truncate_for_width(line: &str, width: usize) -> String {
-    line.chars().take(width).collect()
+    let mut out = String::new();
+    let mut visible_width = 0usize;
+    let mut index = 0usize;
+    let mut saw_ansi = false;
+    let bytes = line.as_bytes();
+
+    while index < bytes.len() && visible_width < width {
+        if bytes[index] == 0x1b
+            && let Some(end) = ansi_escape_end(bytes, index)
+        {
+            out.push_str(&line[index..end]);
+            index = end;
+            saw_ansi = true;
+            continue;
+        }
+
+        let Some(ch) = line[index..].chars().next() else {
+            break;
+        };
+        out.push(ch);
+        visible_width += 1;
+        index += ch.len_utf8();
+    }
+
+    if saw_ansi {
+        out.push_str("\x1b[0m");
+    }
+
+    out
+}
+
+fn ansi_escape_end(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start) != Some(&0x1b) || bytes.get(start + 1) != Some(&b'[') {
+        return None;
+    }
+
+    for (index, byte) in bytes.iter().enumerate().skip(start + 2) {
+        if (0x40..=0x7e).contains(byte) {
+            return Some(index + 1);
+        }
+    }
+
+    None
 }
 
 fn pad_for_width(line: &str, width: usize) -> String {
@@ -1271,5 +1313,17 @@ mod tests {
             repository_global_args(&s(&["--paginate", "--no-pager", "--bare"])),
             s(&["--bare"])
         );
+    }
+
+    #[test]
+    fn truncate_for_width_preserves_ansi_escape_sequences() {
+        let truncated = truncate_for_width("\x1b[90mabcdef\x1b[0m", 3);
+        assert_eq!(truncated, "\x1b[90mabc\x1b[0m");
+    }
+
+    #[test]
+    fn truncate_for_width_does_not_cut_incomplete_ansi_reset() {
+        let truncated = truncate_for_width("\x1b[90mabc\x1b[0mdef", 3);
+        assert_eq!(truncated, "\x1b[90mabc\x1b[0m");
     }
 }
