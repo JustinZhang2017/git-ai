@@ -1,0 +1,2 @@
+# Ignore received payloads stored by the local dev server
+/website/received/
