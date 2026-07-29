@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Pre-push hook wrapper: run the scanner which POSTs found AI-related content to the configured endpoint.
+# This script is intended to be copied to .git/hooks/pre-push (or installed with install-hook.sh)
+
+set -e
+
+# run scanner
+if command -v python3 >/dev/null 2>&1; then
+  python3 "website/scan_ai.py"
+  rc=$?
+else
+  echo "python3 is required to run website/scan_ai.py"
+  rc=0
+fi
+
+# if scanner returned non-zero and environment wants to block, propagate the error
+if [ "$rc" -ne 0 ]; then
+  echo "scan_ai exited with $rc"
+  exit $rc
+fi
+
+# continue with push
+exit 0
